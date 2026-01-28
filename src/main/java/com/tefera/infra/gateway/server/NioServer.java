@@ -9,14 +9,20 @@ import java.util.Set;
 
 import com.tefera.infra.gateway.http.HttpParser;
 import com.tefera.infra.gateway.http.HttpRequest;
+import com.tefera.infra.gateway.http.HttpResponse;
 import com.tefera.infra.gateway.http.ParseResult;
+import com.tefera.infra.gateway.routing.Router;
 
 public class NioServer {
 	private final int port;
 	private final HttpParser parser = new HttpParser();
+	private final Router router = new Router();
 	
 	public NioServer(int port) {
 		this.port = port;
+		
+		router.get("/health", req -> HttpResponse.ok("OK"));
+		router.get("/hello", req -> HttpResponse.ok("Hello from gateway"));	
 	}
 	
 	public void start() throws IOException {
@@ -29,6 +35,8 @@ public class NioServer {
 		serverChannel.register(selector, SelectionKey.OP_ACCEPT);
 		
 		System.out.println("NIO Server listening on port " + port);
+		
+
 		
 		while(true) {
 			selector.select();
@@ -109,9 +117,10 @@ public class NioServer {
 		
 		String connectionValue = context.keepAlive ? "keep-alive" : "close";
 		
-		String body = "Hello";
-		String response = 
-				"HTTP/1.1 200 OK\r\n" +
+		HttpResponse response = router.route(request);
+		String body = response.body;
+		String raw = 
+				"HTTP/1.1 " + response.status + " " + statusText(response.status) + "\r\n" +
 				"Content-length: " + body.length() + "\r\n" +
 				"Connection: " + connectionValue + "\r\n" +
 				"\r\n" +
@@ -120,11 +129,19 @@ public class NioServer {
 		context.readBuffer.position(result.bytesConsumed);
 		context.readBuffer.compact();
 		
-		context.writeBuffer = ByteBuffer.wrap(response.getBytes());
+		context.writeBuffer = ByteBuffer.wrap(raw.getBytes());
 		context.state = ConnectionContext.State.WRITING;
 		
 		key.interestOps(SelectionKey.OP_WRITE);
 		
+	}
+	
+	private String statusText(int status) {
+		return switch(status) {
+			case 200 -> "OK";
+			case 404 -> "Not Found";
+			default -> "Unknown";
+		};
 	}
 	
 	private void handleWrite(SelectionKey key) throws IOException {
