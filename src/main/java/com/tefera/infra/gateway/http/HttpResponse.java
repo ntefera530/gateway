@@ -15,6 +15,13 @@ public class HttpResponse {
 		return r;
 	}
 	
+	public static HttpResponse badGateway(String body) {
+		HttpResponse r = new HttpResponse();
+		r.status = 502;
+		r.body = body;
+		return r;
+	}
+	
 	public static HttpResponse notFound() {
 		HttpResponse r = new HttpResponse();
 		r.status = 404;

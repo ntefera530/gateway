@@ -4,9 +4,12 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Set;
 
+import com.tefera.infra.gateway.http.AsyncHttpHandler;
+import com.tefera.infra.gateway.http.HttpHandler;
 import com.tefera.infra.gateway.http.HttpParser;
 import com.tefera.infra.gateway.http.HttpRequest;
 import com.tefera.infra.gateway.http.HttpResponse;
@@ -22,11 +25,12 @@ public class NioServer {
 	public NioServer(int port) {
 		this.port = port;
 		
-		router.get("/health", req -> HttpResponse.ok("OK"));
-		router.get("/hello", req -> HttpResponse.ok("Hello from gateway"));	
+		//router.get("/health", req -> HttpResponse.ok("OK"));
+		//router.get("/hello", req -> HttpResponse.ok("Hello from gateway"));	
 		
 		//Test Proxy
-		router.get("/api", new ProxyHandler("localhost", 9000));
+		//router.get("/api", new ProxyHandler("localhost", 9000));
+		router.getAsync("/api", new ProxyHandler("localhost", 9000));
 	}
 	
 	public void start() throws IOException {
@@ -60,10 +64,22 @@ public class NioServer {
 			    try {
 			        if (key.isAcceptable()) {
 			            handleAccept(key, selector);
-			        } else if (key.isReadable()) {
-			            handleRead(key);
+			        } 
+			        else if (key.isConnectable()) {
+			        		handleBackendConnect(key);
+			        }
+			        else if (key.isReadable()) {
+			        		if (key.attachment() instanceof BackendContext) {
+			        		    handleBackendRead(key);
+			        		} else {
+			        			handleRead(key, selector);
+			        		}
 			        } else if (key.isWritable()) {
-			            handleWrite(key);
+			        	    if (key.attachment() instanceof BackendContext) {
+			        		        handleBackendWrite(key);
+			        		    } else {
+			        		        handleWrite(key);
+			        		}
 			        }
 			    } catch (IOException e) {
 			        key.cancel();
@@ -92,11 +108,10 @@ public class NioServer {
 		System.out.println("Accepted connection from " + clientChannel.getRemoteAddress());
 	}
 	
-	
-	private void handleRead(SelectionKey key) throws IOException {
+	private void handleRead(SelectionKey clientKey, Selector selector) throws IOException {
 		System.out.println("Read");
-		SocketChannel channel = (SocketChannel) key.channel();
-		ConnectionContext context = (ConnectionContext) key.attachment();
+		SocketChannel channel = (SocketChannel) clientKey.channel();
+		ConnectionContext context = (ConnectionContext) clientKey.attachment();
 		
 		
 		int bytesRead = channel.read(context.readBuffer);
@@ -113,7 +128,7 @@ public class NioServer {
 		
 		HttpRequest request = result.request;
 
-
+		
 		String connectionHeader = request.headers.get("Connection");
 		if("close".equalsIgnoreCase(connectionHeader)) {
 			context.keepAlive = false;
@@ -121,23 +136,36 @@ public class NioServer {
 		
 		String connectionValue = context.keepAlive ? "keep-alive" : "close";
 		
-		HttpResponse response = router.route(request);
-		String body = response.body;
-		String raw = 
-				"HTTP/1.1 " + response.status + " " + statusText(response.status) + "\r\n" +
-				"Content-length: " + body.length() + "\r\n" +
-				"Connection: " + connectionValue + "\r\n" +
-				"\r\n" +
-				body;
+		Object handler = router.route(request);
 		
-		context.readBuffer.position(result.bytesConsumed);
-		context.readBuffer.compact();
+		if (handler instanceof HttpHandler sync) {
+		    HttpResponse response = sync.handle(request);
+		    writeResponse(clientKey, context, response);
+		    return;
+		}
 		
-		context.writeBuffer = ByteBuffer.wrap(raw.getBytes());
-		context.state = ConnectionContext.State.WRITING;
+		if (handler instanceof AsyncHttpHandler async) {
+		    // pause client socket until backend responds
+		    clientKey.interestOps(0);
+		    async.handleAsync(request, clientKey, selector);
+		    return;
+		}
 		
-		key.interestOps(SelectionKey.OP_WRITE);
+	}
+	
+	private void writeResponse(SelectionKey key, ConnectionContext context, HttpResponse response) {
+		String body = response.body == null ? "" : response.body;
 		
+	    String raw =
+	    		"HTTP/1.1 " + response.status + " " + statusText(response.status) + "\r\n" +
+			"Content-Length: " + body.length() + "\r\n" +
+			"Connection: " + (context.keepAlive ? "keep-alive" : "close") + "\r\n" +
+			 "\r\n" +
+			 body;
+			
+	    context.writeBuffer = ByteBuffer.wrap(raw.getBytes());
+	    context.state = ConnectionContext.State.WRITING;
+	    key.interestOps(SelectionKey.OP_WRITE);
 	}
 	
 	private String statusText(int status) {
@@ -164,8 +192,56 @@ public class NioServer {
 	        	key.cancel();
 	        	channel.close();
 	        }
+	    }  
+	}
+	
+	private void handleBackendConnect(SelectionKey key) throws IOException {
+	    SocketChannel backend = (SocketChannel) key.channel();
+	    BackendContext ctx = (BackendContext) key.attachment();
+
+	    if (backend.finishConnect()) {
+	        key.interestOps(SelectionKey.OP_WRITE);
 	    }
-	    
-	    
+	}
+	
+	private void handleBackendWrite(SelectionKey key) throws IOException {
+	    SocketChannel backend = (SocketChannel) key.channel();
+	    BackendContext ctx = (BackendContext) key.attachment();
+
+	    backend.write(ctx.writeBuffer);
+
+	    if (!ctx.writeBuffer.hasRemaining()) {
+	        key.interestOps(SelectionKey.OP_READ);
+	    }
+	}
+	
+	private void handleBackendRead(SelectionKey key) throws IOException {
+	    SocketChannel backend = (SocketChannel) key.channel();
+	    BackendContext backendCtx = (BackendContext) key.attachment();
+
+	    int n = backend.read(backendCtx.readBuffer);
+	    if (n == -1) {
+	        backend.close();
+	        key.cancel();
+
+	        backendCtx.readBuffer.flip();
+	        byte[] bytes = new byte[backendCtx.readBuffer.remaining()];
+	        backendCtx.readBuffer.get(bytes);
+
+	        String raw = new String(bytes, StandardCharsets.US_ASCII);
+
+	        int split = raw.indexOf("\r\n\r\n");
+	        String body = split == -1 ? "" : raw.substring(split + 4);
+
+	        HttpResponse resp = HttpResponse.ok(body);
+
+	        writeResponse(
+	            backendCtx.clientKey,
+	            backendCtx.clientContext,
+	            resp
+	        );
+
+	        return;
+	    }
 	}
 }
