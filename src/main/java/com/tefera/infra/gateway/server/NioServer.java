@@ -11,6 +11,7 @@ import com.tefera.infra.gateway.http.HttpParser;
 import com.tefera.infra.gateway.http.HttpRequest;
 import com.tefera.infra.gateway.http.HttpResponse;
 import com.tefera.infra.gateway.http.ParseResult;
+import com.tefera.infra.gateway.proxy.ProxyHandler;
 import com.tefera.infra.gateway.routing.Router;
 
 public class NioServer {
@@ -23,6 +24,9 @@ public class NioServer {
 		
 		router.get("/health", req -> HttpResponse.ok("OK"));
 		router.get("/hello", req -> HttpResponse.ok("Hello from gateway"));	
+		
+		//Test Proxy
+		router.get("/api", new ProxyHandler("localhost", 9000));
 	}
 	
 	public void start() throws IOException {
