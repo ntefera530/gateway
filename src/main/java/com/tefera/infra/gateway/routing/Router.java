@@ -10,20 +10,17 @@ import com.tefera.infra.gateway.http.HttpResponse;
 
 
 public class Router {
-	//private final Map<String, HttpHandler> routes = new HashMap<>();
-	private final Map<String, Object> routes = new HashMap<>();
-	
-	public void get(String path, HttpHandler handler) {
-		routes.put(path, handler);
+	public Backend route(HttpRequest req) {
+        String path = req.getPath();
+
+        if (path.startsWith("/users")) {
+            return new Backend("users-service", 9000);
+        }
+
+        if (path.startsWith("/orders")) {
+            return new Backend("orders-service", 9000);
+        }
+
+        return new Backend("default-service", 9000);
 	}
-	
-	//TODO Ugly - make it better
-	public void getAsync(String path, AsyncHttpHandler handler) {
-		routes.put(path, handler);
-	}
-	
-	public Object route(HttpRequest request) {
-        return routes.get(request.path);
-    }
-	
 }
